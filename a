@@ -1,0 +1,268 @@
+<title>逃げるボタン</title>
+<style>
+:root { --bg: #ffffff; --ink: #1a1a1a; color-scheme: light; }
+html, body { height: 100%; }
+body { background: var(--bg); color: var(--ink); overflow: hidden; padding: 0; font: 16px system-ui, "Hiragino Sans", "Yu Gothic", sans-serif; }
+#hud { position: absolute; left: 12px; top: 8px; z-index: 2; display: flex; gap: 20px; align-items: flex-start; font-variant-numeric: tabular-nums; }
+#stats { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+#levels { display: flex; flex-direction: column; gap: 2px; min-width: 6em; font-size: 14px; }
+#push, #buy { position: absolute; left: 0; top: 0; }
+#buy { background: #15803d; color: #ffffff; border: 2px solid #14532d; font-weight: 700; cursor: pointer; }
+.man { position: absolute; width: 24px; height: 40px; pointer-events: none; }
+.man .lv { position: absolute; left: 50%; bottom: 100%; transform: translateX(-50%); font: 700 12px/1 system-ui, "Hiragino Sans", "Yu Gothic", sans-serif; white-space: nowrap; font-variant-numeric: tabular-nums; }
+</style>
+
+<div id="hud">
+  <div id="levels"></div>
+  <div id="stats">
+    <div id="count">0回</div>
+    <div id="points">ポイント 0</div>
+    <div id="owned">棒人間 0人</div>
+  </div>
+</div>
+<button id="push" type="button">押す</button>
+<button id="buy" type="button" hidden>買う</button>
+
+<script>
+(function () {
+  var pushBtn = document.getElementById('push');
+  var buyBtn = document.getElementById('buy');
+  var countEl = document.getElementById('count');
+  var pointsEl = document.getElementById('points');
+  var ownedEl = document.getElementById('owned');
+  var levelsEl = document.getElementById('levels');
+  var hudEl = document.getElementById('hud');
+
+  var count = 0, points = 0;
+  var men = [];
+  var pad = 16;
+  var MAN_W = 24, MAN_H = 40;
+  var SPEED = 10;         // 合成0回の棒人間が1ティックで進むpx
+  var TICK = 100;         // ミリ秒
+  var BUTTON_RATIO = 5;   // 最速の棒人間が速くなったら、ボタンはその5倍の速さ
+  var BUTTON_BASE = 1600; // ボタンの初期速度(px/秒)。一瞬で逃げる速さ
+
+  // 合成回数ごとの色(黒、青、緑、橙、赤、紫、桃、水色。以降は色相を回す)
+  var COLORS = ['#1a1a1a', '#2563eb', '#16a34a', '#d97706', '#dc2626', '#9333ea', '#db2777', '#0891b2'];
+  function colorOf(level) {
+    return level < COLORS.length ? COLORS[level] : 'hsl(' + ((level * 47) % 360) + ' 70% 38%)';
+  }
+
+  // 押すボタンと買うボタンは別々に動く。x,y が現在位置、gx,gy が目的地。
+  function mk(el) { return { el: el, x: 0, y: 0, gx: 0, gy: 0, w: 0, h: 0 }; }
+  var push = mk(pushBtn), buy = mk(buyBtn);
+
+  var SVG = '<svg viewBox="0 0 24 40" width="24" height="40" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">' +
+    '<circle cx="12" cy="7" r="5"/><line x1="12" y1="12" x2="12" y2="26"/>' +
+    '<line x1="12" y1="16" x2="4" y2="22"/><line x1="12" y1="16" x2="20" y2="22"/>' +
+    '<line x1="12" y1="26" x2="6" y2="37"/><line x1="12" y1="26" x2="18" y2="37"/></svg>';
+
+  function cost() { return 10; }
+
+  function measure(m) {
+    var r = m.el.getBoundingClientRect();
+    m.w = r.width; m.h = r.height;
+  }
+  function place(m) {
+    m.el.style.left = m.x + 'px';
+    m.el.style.top = m.y + 'px';
+  }
+
+  // 左上の表示部分と、もう一方のボタンの目的地には逃げ込まない
+  function blocked(m, x, y) {
+    var hud = hudEl.getBoundingClientRect();
+    if (x < hud.right + 8 && x + m.w > hud.left - 8 && y < hud.bottom + 8 && y + m.h > hud.top - 8) return true;
+    var o = m === push ? buy : push;
+    if (!o.el.hidden &&
+        x < o.gx + o.w + 8 && x + m.w > o.gx - 8 && y < o.gy + o.h + 8 && y + m.h > o.gy - 8) return true;
+    return false;
+  }
+
+  function dodge(m) {
+    var maxX = Math.max(pad, window.innerWidth - m.w - pad);
+    var maxY = Math.max(pad, window.innerHeight - m.h - pad);
+    var minDist = Math.min(220, Math.max(maxX, maxY) / 2);
+    var nx, ny, tries = 0;
+    do {
+      nx = pad + Math.random() * (maxX - pad);
+      ny = pad + Math.random() * (maxY - pad);
+      tries++;
+    } while ((Math.hypot(nx - m.x, ny - m.y) < minDist || blocked(m, nx, ny)) && tries < 80);
+    if (blocked(m, nx, ny)) { nx = Math.max(pad, maxX); ny = Math.max(pad, maxY); }
+    m.gx = nx; m.gy = ny;
+  }
+
+  function manSpeed(level) { return SPEED * Math.pow(1.5, level); }   // px/ティック
+
+  function maxLevel() {
+    var v = 0;
+    for (var i = 0; i < men.length; i++) if (men[i].level > v) v = men[i].level;
+    return v;
+  }
+
+  function paintMan(m) {
+    m.el.style.color = colorOf(m.level);
+    m.lv.textContent = m.level + '回';
+    m.el.style.left = m.x + 'px';
+    m.el.style.top = m.y + 'px';
+  }
+
+  function render() {
+    countEl.textContent = count + '回';
+    pointsEl.textContent = 'ポイント ' + points;
+    ownedEl.textContent = '棒人間 ' + men.length + '人';
+
+    // 買えるときだけ買うボタンを出す(出るときは画面のどこかに現れる)
+    var canBuy = points >= cost();
+    if (canBuy && buyBtn.hidden) {
+      buyBtn.hidden = false;
+      scatterBuy();
+    } else if (!canBuy && !buyBtn.hidden) {
+      buyBtn.hidden = true;
+    }
+
+    // 合成回数ごとの人数(棒人間の色と同じ色で表示)
+    var tally = {};
+    for (var i = 0; i < men.length; i++) tally[men[i].level] = (tally[men[i].level] || 0) + 1;
+    var keys = Object.keys(tally).map(Number).sort(function (a, b) { return a - b; });
+    var html = '<div>合成回数別</div>';
+    if (!keys.length) html += '<div>なし</div>';
+    for (var k = 0; k < keys.length; k++) {
+      html += '<div style="color:' + colorOf(keys[k]) + '">' + keys[k] + '回: ' + tally[keys[k]] + '体</div>';
+    }
+    levelsEl.innerHTML = html;
+  }
+
+  function center() {
+    measure(push);
+    push.x = push.gx = Math.max(0, (window.innerWidth - push.w) / 2);
+    push.y = push.gy = Math.max(0, (window.innerHeight - push.h) / 2);
+    place(push);
+    if (!buyBtn.hidden) {
+      measure(buy);
+      buy.x = buy.gx = Math.min(buy.x, Math.max(0, window.innerWidth - buy.w));
+      buy.y = buy.gy = Math.min(buy.y, Math.max(0, window.innerHeight - buy.h));
+      place(buy);
+    }
+  }
+
+  // 押された判定。人間のクリックも棒人間の接触も同じ扱いで、1回につき1ポイント。
+  function press(n) {
+    count += n;
+    points += n;
+    render();
+    dodge(push);
+  }
+
+  pushBtn.addEventListener('pointerdown', function (e) { e.preventDefault(); press(1); });
+  pushBtn.addEventListener('click', function (e) {
+    // マウスやタッチは pointerdown で処理済み。キーボード操作(detail が 0)のときだけここで数える。
+    if (e.detail === 0) press(1);
+  });
+
+  function buyOne() {
+    var c = cost();
+    if (points < c) return false;
+    points -= c;
+    var el = document.createElement('div');
+    el.className = 'man';
+    el.innerHTML = SVG + '<span class="lv"></span>';
+    // 画面の四辺のどこかから出てくる(上の合成回数が見切れないよう上端は余白を空ける)
+    var w = window.innerWidth, h = window.innerHeight, x, y;
+    var side = Math.floor(Math.random() * 4);
+    if (side === 0) { x = Math.random() * (w - MAN_W); y = pad; }
+    else if (side === 1) { x = Math.random() * (w - MAN_W); y = h - MAN_H; }
+    else if (side === 2) { x = 0; y = pad + Math.random() * (h - MAN_H - pad); }
+    else { x = w - MAN_W; y = pad + Math.random() * (h - MAN_H - pad); }
+    document.body.appendChild(el);
+    var m = { el: el, lv: el.querySelector('.lv'), x: x, y: y, level: 0 };
+    men.push(m);
+    paintMan(m);
+    render();
+    return true;
+  }
+
+  // 買うボタンは押した人だけが押せる。押すと買って、そのまま逃げる。
+  buyBtn.addEventListener('click', function () {
+    // 買ったあとは必ず逃げる
+    if (buyOne() && !buyBtn.hidden) dodge(buy);
+  });
+
+  // 買うボタンを画面のどこかに置く(動くモード用)
+  function scatterBuy() {
+    measure(buy);
+    dodge(buy);
+    buy.x = buy.gx; buy.y = buy.gy;
+    place(buy);
+  }
+
+
+  // 棒人間は一定間隔で押すボタンの方へ位置が切り替わるだけ。歩きの動きは付けない。
+  setInterval(function () {
+    // 同じ合成回数の棒人間同士が触れたら、速さ1.5倍の1人に合成する
+    var merged = false;
+    for (var a = 0; a < men.length; a++) {
+      for (var b = a + 1; b < men.length; b++) {
+        var p = men[a], q = men[b];
+        if (p.level !== q.level) continue;
+        if (p.x < q.x + MAN_W && p.x + MAN_W > q.x && p.y < q.y + MAN_H && p.y + MAN_H > q.y) {
+          p.level++;
+          p.x = (p.x + q.x) / 2;
+          p.y = (p.y + q.y) / 2;
+          paintMan(p);
+          q.el.remove();
+          men.splice(b, 1);
+          merged = true;
+          b = a;
+        }
+      }
+    }
+    if (merged) render();
+
+    // 追いかけるのは押すボタンだけ
+    var tx = push.x + push.w / 2, ty = push.y + push.h / 2;
+    var touches = 0;
+    var maxX = window.innerWidth - MAN_W, maxY = window.innerHeight - MAN_H;
+    for (var i = 0; i < men.length; i++) {
+      var m = men[i];
+      var dx = tx - (m.x + MAN_W / 2), dy = ty - (m.y + MAN_H / 2);
+      var d = Math.hypot(dx, dy);
+      if (d > 0) {
+        var s = Math.min(d, manSpeed(m.level));
+        m.x = Math.min(maxX, Math.max(0, m.x + dx / d * s));
+        m.y = Math.min(maxY, Math.max(pad, m.y + dy / d * s));
+        m.el.style.left = m.x + 'px';
+        m.el.style.top = m.y + 'px';
+      }
+      var hit = m.x < push.x + push.w && m.x + MAN_W > push.x && m.y < push.y + push.h && m.y + MAN_H > push.y;
+      if (hit) touches++;
+    }
+    if (touches > 0) press(touches);
+  }, TICK);
+
+  // 2つのボタンはそれぞれ、最速の棒人間が速くなったらその5倍の速さで目的地へ動く(滑らかに動かす)
+  function step(m, dt, perSec) {
+    var d = Math.hypot(m.gx - m.x, m.gy - m.y);
+    if (d <= 0) return;
+    var s = perSec * dt;
+    if (s >= d) { m.x = m.gx; m.y = m.gy; }
+    else { m.x += (m.gx - m.x) / d * s; m.y += (m.gy - m.y) / d * s; }
+    place(m);
+  }
+
+  var last = performance.now();
+  function frame(now) {
+    var dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    var perSec = Math.max(BUTTON_BASE, manSpeed(maxLevel()) * (1000 / TICK) * BUTTON_RATIO);
+    step(push, dt, perSec);
+    if (!buyBtn.hidden) step(buy, dt, perSec);
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', center);
+  center();
+  render();
+  requestAnimationFrame(frame);
+})();
+</script>
